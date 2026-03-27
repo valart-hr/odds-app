@@ -4,6 +4,7 @@ import psycopg2
 import os
 import datetime
 import time
+import threading
 
 app = FastAPI()
 
@@ -56,10 +57,7 @@ def fetch_odds():
                         datetime.datetime.utcnow()
                     ))
 
-                    if outcome_name not in outcomes_dict:
-                        outcomes_dict[outcome_name] = []
-
-                    outcomes_dict[outcome_name].append({
+                    outcomes_dict.setdefault(outcome_name, []).append({
                         "bookmaker": bookmaker_name,
                         "price": price
                     })
@@ -97,11 +95,16 @@ def fetch_odds():
     print("Done. Sleeping...")
 
 
-if __name__ == "__main__":
+def worker_loop():
     while True:
         try:
             fetch_odds()
         except Exception as e:
             print("Error:", e)
-
         time.sleep(60)
+
+
+@app.on_event("startup")
+def start_background_worker():
+    thread = threading.Thread(target=worker_loop, daemon=True)
+    thread.start()
