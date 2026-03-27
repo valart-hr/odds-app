@@ -11,11 +11,19 @@ app = FastAPI()
 API_KEY = os.getenv("API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Telegram je opcionalan
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
 FETCH_INTERVAL_SECONDS = 60
+
+# Filteri
 MIN_BOOKMAKERS_PER_OUTCOME = 3
-MIN_PRICE = 1.50
-MAX_PRICE = 5.00
+MIN_PRICE = 1.70
+MAX_PRICE = 4.50
 MIN_DEVIATION_PERCENT = 8.0
+MIN_EXPECTED_VALUE = 0.03
+MAX_MARKET_SPREAD_PERCENT = 60.0
 
 
 @app.get("/")
@@ -28,12 +36,62 @@ def health():
     return {"ok": True}
 
 
-def get_conn():
-    return psycopg2.connect(DATABASE_URL)
+@app.get("/latest-anomalies")
+def latest_anomalies():
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT home, away, outcome, bookmaker, bookmaker_price, market_avg,
+               deviation_percent, expected_value, signal_score, created_at
+        FROM odds_anomalies
+        ORDER BY id DESC
+        LIMIT 20
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "home": row[0],
+            "away": row[1],
+            "outcome": row[2],
+            "bookmaker": row[3],
+            "bookmaker_price": row[4],
+            "market_avg": row[5],
+            "deviation_percent": row[6],
+            "expected_value": row[7],
+            "signal_score": row[8],
+            "created_at": str(row[9]),
+        })
+
+    return result
 
 
 def normalize_text(value: str) -> str:
     return (value or "").strip()
+
+
+def send_telegram_message(text: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    try:
+        requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text
+            },
+            timeout=15
+        )
+    except Exception as e:
+        print("Telegram error:", e)
 
 
 def fetch_odds():
@@ -60,7 +118,7 @@ def fetch_odds():
         print("No odds data received")
         return
 
-    conn = get_conn()
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
 
     now_utc = datetime.datetime.utcnow()
@@ -89,8 +147,8 @@ def fetch_odds():
             for market in bookmaker.get("markets", []):
                 for outcome in market.get("outcomes", []):
                     outcome_name = normalize_text(outcome.get("name"))
-
                     raw_price = outcome.get("price")
+
                     if outcome_name == "" or raw_price is None:
                         continue
 
@@ -102,6 +160,7 @@ def fetch_odds():
                     if price <= 1.0:
                         continue
 
+                    # spremi sve u odds_history
                     history_key = (home, away, bookmaker_name, outcome_name, price)
                     if history_key not in seen_history:
                         cur.execute(
@@ -132,6 +191,7 @@ def fetch_odds():
         seen_anomalies = set()
 
         for outcome_name, odds_list in outcomes_dict.items():
+            # jedan bookmaker = jedna kvota, uzmi najvišu
             per_bookmaker = {}
             for item in odds_list:
                 name = item["bookmaker"]
@@ -157,7 +217,7 @@ def fetch_odds():
                 continue
 
             market_spread_percent = ((max_price - min_price) / min_price) * 100
-            if market_spread_percent > 80:
+            if market_spread_percent > MAX_MARKET_SPREAD_PERCENT:
                 continue
 
             for item in filtered:
@@ -167,15 +227,33 @@ def fetch_odds():
                 if deviation_percent < MIN_DEVIATION_PERCENT:
                     continue
 
-                anomaly_key = (home, away, outcome_name, item["bookmaker"], round(bookmaker_price, 4))
+                market_prob = 1 / market_avg
+                implied_prob = 1 / bookmaker_price
+                expected_value = (market_prob * bookmaker_price) - 1
+                signal_score = (deviation_percent * 0.7) + (expected_value * 100 * 0.3)
+
+                if expected_value < MIN_EXPECTED_VALUE:
+                    continue
+
+                anomaly_key = (
+                    home,
+                    away,
+                    outcome_name,
+                    item["bookmaker"],
+                    round(bookmaker_price, 4)
+                )
                 if anomaly_key in seen_anomalies:
                     continue
 
                 cur.execute(
                     """
                     INSERT INTO odds_anomalies
-                    (home, away, bookmaker, outcome, market_avg, bookmaker_price, deviation_percent, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (
+                        home, away, bookmaker, outcome,
+                        market_avg, bookmaker_price, deviation_percent, created_at,
+                        implied_prob, market_prob, expected_value, signal_score
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         home,
@@ -186,6 +264,10 @@ def fetch_odds():
                         round(bookmaker_price, 4),
                         round(deviation_percent, 2),
                         now_utc,
+                        round(implied_prob, 6),
+                        round(market_prob, 6),
+                        round(expected_value, 4),
+                        round(signal_score, 2),
                     ),
                 )
 
@@ -195,8 +277,24 @@ def fetch_odds():
                 print(
                     f"ANOMALY | {home} vs {away} | {outcome_name} | "
                     f"{item['bookmaker']} | price={bookmaker_price:.2f} | "
-                    f"avg={market_avg:.2f} | dev={deviation_percent:.2f}%"
+                    f"avg={market_avg:.2f} | dev={deviation_percent:.2f}% | "
+                    f"ev={expected_value:.4f} | score={signal_score:.2f}"
                 )
+
+                # Telegram alert samo za jače signale
+                if signal_score >= 10:
+                    message = (
+                        f"Anomaly signal\n"
+                        f"{home} vs {away}\n"
+                        f"Ishod: {outcome_name}\n"
+                        f"Bookmaker: {item['bookmaker']}\n"
+                        f"Kvota: {bookmaker_price:.2f}\n"
+                        f"Market avg: {market_avg:.2f}\n"
+                        f"Dev: {deviation_percent:.2f}%\n"
+                        f"EV: {expected_value:.4f}\n"
+                        f"Score: {signal_score:.2f}"
+                    )
+                    send_telegram_message(message)
 
     conn.commit()
     cur.close()
