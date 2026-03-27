@@ -12,14 +12,11 @@ app = FastAPI()
 API_KEY = os.getenv("API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Telegram opcionalno
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Interval osvježavanja
 FETCH_INTERVAL_SECONDS = 60
 
-# Filteri
 MIN_BOOKMAKERS_PER_OUTCOME = 3
 MIN_PRICE = 1.40
 MAX_PRICE = 6.00
@@ -45,71 +42,231 @@ def send_telegram_message(text: str):
     try:
         requests.post(
             url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text
-            },
-            timeout=15
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+            timeout=15,
         )
     except Exception as e:
         print("Telegram error:", e)
 
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return """
+def format_dt(value):
+    return str(value) if value else ""
+
+
+def render_layout(title: str, body: str):
+    return f"""
     <html>
     <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Odds Scanner</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+        <meta name="theme-color" content="#111827" />
+        <title>{title}</title>
         <style>
-            body {
-                font-family: Arial, sans-serif;
+            * {{
+                box-sizing: border-box;
+            }}
+            body {{
                 margin: 0;
-                padding: 16px;
-                background: #f5f5f5;
-                color: #111;
-            }
-            .card {
+                font-family: Arial, sans-serif;
+                background: #f3f4f6;
+                color: #111827;
+            }}
+            .app {{
+                max-width: 760px;
+                margin: 0 auto;
+                padding: 14px;
+            }}
+            .header {{
+                background: linear-gradient(135deg, #111827, #1f2937);
+                color: white;
+                border-radius: 18px;
+                padding: 18px;
+                margin-bottom: 14px;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+            }}
+            .header h1 {{
+                margin: 0 0 6px 0;
+                font-size: 26px;
+            }}
+            .muted {{
+                color: #9ca3af;
+                font-size: 14px;
+            }}
+            .grid {{
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+                margin-bottom: 14px;
+            }}
+            .stat {{
                 background: white;
-                border-radius: 14px;
-                padding: 16px;
-                margin-bottom: 12px;
+                border-radius: 16px;
+                padding: 14px;
                 box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-            }
-            h1 {
-                font-size: 24px;
-                margin-bottom: 8px;
-            }
-            a.button {
+            }}
+            .stat .label {{
+                font-size: 13px;
+                color: #6b7280;
+                margin-bottom: 6px;
+            }}
+            .stat .value {{
+                font-size: 22px;
+                font-weight: 700;
+            }}
+            .nav {{
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-bottom: 14px;
+            }}
+            .nav a {{
                 display: inline-block;
-                padding: 12px 16px;
-                background: #111;
+                padding: 10px 14px;
+                background: #111827;
                 color: white;
                 text-decoration: none;
-                border-radius: 10px;
-                margin-top: 8px;
-                margin-right: 8px;
-            }
-            .small {
-                color: #666;
+                border-radius: 12px;
                 font-size: 14px;
-            }
+            }}
+            .card {{
+                background: white;
+                border-radius: 16px;
+                padding: 14px;
+                margin-bottom: 12px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            }}
+            .title {{
+                font-size: 18px;
+                font-weight: 700;
+                margin-bottom: 8px;
+                line-height: 1.3;
+            }}
+            .row {{
+                margin: 5px 0;
+                font-size: 15px;
+            }}
+            .time {{
+                margin-top: 8px;
+                font-size: 12px;
+                color: #6b7280;
+            }}
+            .badge {{
+                display: inline-block;
+                padding: 3px 8px;
+                border-radius: 999px;
+                background: #e5e7eb;
+                font-size: 12px;
+                margin-left: 6px;
+            }}
+            .good {{
+                background: #dcfce7;
+                color: #166534;
+            }}
+            .mid {{
+                background: #fef3c7;
+                color: #92400e;
+            }}
+            .low {{
+                background: #e5e7eb;
+                color: #374151;
+            }}
+            .empty {{
+                text-align: center;
+                color: #6b7280;
+                padding: 24px 10px;
+            }}
+            .footer {{
+                text-align: center;
+                font-size: 12px;
+                color: #6b7280;
+                padding: 12px 0 20px;
+            }}
+            @media (max-width: 560px) {{
+                .grid {{
+                    grid-template-columns: 1fr 1fr;
+                }}
+                .header h1 {{
+                    font-size: 22px;
+                }}
+            }}
         </style>
     </head>
     <body>
-        <div class="card">
-            <h1>Odds Scanner</h1>
-            <div class="small">App radi i skenira tržište.</div>
-            <p>
-                <a class="button" href="/signals">Otvori zadnje signale</a>
-                <a class="button" href="/health">Health check</a>
-                <a class="button" href="/latest-anomalies">Raw JSON</a>
-            </p>
+        <div class="app">
+            {body}
+            <div class="footer">Odds Scanner mobile view</div>
         </div>
     </body>
     </html>
     """
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM odds_history")
+    history_count = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM odds_anomalies")
+    anomaly_count = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM odds_anomalies
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+    """)
+    anomaly_24h = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT MAX(created_at)
+        FROM odds_anomalies
+    """)
+    last_signal = cur.fetchone()[0]
+
+    cur.close()
+    conn.close()
+
+    body = f"""
+    <div class="header">
+        <h1>Odds Scanner</h1>
+        <div class="muted">Mini app za mobitel</div>
+    </div>
+
+    <div class="grid">
+        <div class="stat">
+            <div class="label">History rows</div>
+            <div class="value">{history_count}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Anomalies total</div>
+            <div class="value">{anomaly_count}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Anomalies 24h</div>
+            <div class="value">{anomaly_24h}</div>
+        </div>
+        <div class="stat">
+            <div class="label">Last signal</div>
+            <div class="value" style="font-size:14px;">{format_dt(last_signal) if last_signal else "Nema"}</div>
+        </div>
+    </div>
+
+    <div class="nav">
+        <a href="/signals">Zadnji signali</a>
+        <a href="/top-signals">Top signali</a>
+        <a href="/health">Health</a>
+        <a href="/latest-anomalies">JSON</a>
+    </div>
+
+    <div class="card">
+        <div class="title">Kako koristiti</div>
+        <div class="row">1. Otvori <b>Zadnji signali</b> za najnovije zapise.</div>
+        <div class="row">2. Otvori <b>Top signali</b> za jače scoreove u zadnja 24 sata.</div>
+        <div class="row">3. Dodaj ovu stranicu na početni ekran mobitela za brzi pristup.</div>
+    </div>
+    """
+    return render_layout("Odds Scanner", body)
 
 
 @app.get("/health")
@@ -148,7 +305,6 @@ def latest_anomalies():
             "signal_score": row[8],
             "created_at": str(row[9]),
         })
-
     return result
 
 
@@ -173,9 +329,8 @@ def signals():
 
     if not rows:
         cards = """
-        <div class="card">
-            <div class="title">Nema signala još</div>
-            <div class="muted">Pričekaj malo i osvježi stranicu.</div>
+        <div class="card empty">
+            Nema signala još. Pričekaj malo i osvježi stranicu.
         </div>
         """
     else:
@@ -183,11 +338,14 @@ def signals():
             home, away, outcome, bookmaker, bookmaker_price, market_avg, deviation_percent, expected_value, signal_score, created_at = row
 
             if signal_score >= 12:
-                badge = "Jak signal"
+                badge_class = "good"
+                badge_text = "Jak"
             elif signal_score >= 9:
-                badge = "Srednji signal"
+                badge_class = "mid"
+                badge_text = "Srednji"
             else:
-                badge = "Slabiji signal"
+                badge_class = "low"
+                badge_text = "Slabiji"
 
             cards += f"""
             <div class="card">
@@ -198,86 +356,91 @@ def signals():
                 <div class="row"><b>Market avg:</b> {market_avg}</div>
                 <div class="row"><b>Dev:</b> {deviation_percent}%</div>
                 <div class="row"><b>EV:</b> {expected_value}</div>
-                <div class="row"><b>Score:</b> {signal_score} <span class="badge">{badge}</span></div>
+                <div class="row"><b>Score:</b> {signal_score} <span class="badge {badge_class}">{badge_text}</span></div>
                 <div class="time">{created_at}</div>
             </div>
             """
 
-    return f"""
-    <html>
-    <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Signals</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 0;
-                padding: 12px;
-                background: #f3f4f6;
-                color: #111827;
-            }}
-            .top {{
-                margin-bottom: 12px;
-            }}
-            .title-main {{
-                font-size: 24px;
-                font-weight: 700;
-                margin-bottom: 4px;
-            }}
-            .muted {{
-                color: #6b7280;
-                font-size: 14px;
-            }}
-            .card {{
-                background: white;
-                border-radius: 16px;
-                padding: 14px;
-                margin-bottom: 12px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.08);
-            }}
-            .title {{
-                font-size: 18px;
-                font-weight: 700;
-                margin-bottom: 8px;
-            }}
-            .row {{
-                margin: 4px 0;
-                font-size: 15px;
-            }}
-            .time {{
-                margin-top: 8px;
-                font-size: 12px;
-                color: #6b7280;
-            }}
-            .badge {{
-                display: inline-block;
-                padding: 3px 8px;
-                border-radius: 999px;
-                background: #e5e7eb;
-                font-size: 12px;
-                margin-left: 6px;
-            }}
-            a.button {{
-                display: inline-block;
-                padding: 10px 14px;
-                background: #111827;
-                color: white;
-                text-decoration: none;
-                border-radius: 10px;
-                margin-top: 8px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="top">
-            <div class="title-main">Zadnji signali</div>
-            <div class="muted">Prikaz zadnjih 30 anomaly zapisa</div>
-            <a class="button" href="/">Početna</a>
-        </div>
-        {cards}
-    </body>
-    </html>
+    body = f"""
+    <div class="header">
+        <h1>Zadnji signali</h1>
+        <div class="muted">Prikaz zadnjih 30 anomaly zapisa</div>
+    </div>
+    <div class="nav">
+        <a href="/">Početna</a>
+        <a href="/top-signals">Top signali</a>
+    </div>
+    {cards}
     """
+    return render_layout("Zadnji signali", body)
+
+
+@app.get("/top-signals", response_class=HTMLResponse)
+def top_signals():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT home, away, outcome, bookmaker, bookmaker_price, market_avg,
+               deviation_percent, expected_value, signal_score, created_at
+        FROM odds_anomalies
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+        ORDER BY signal_score DESC, id DESC
+        LIMIT 20
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    cards = ""
+
+    if not rows:
+        cards = """
+        <div class="card empty">
+            Nema top signala u zadnja 24 sata.
+        </div>
+        """
+    else:
+        for row in rows:
+            home, away, outcome, bookmaker, bookmaker_price, market_avg, deviation_percent, expected_value, signal_score, created_at = row
+
+            if signal_score >= 12:
+                badge_class = "good"
+                badge_text = "Jak"
+            elif signal_score >= 9:
+                badge_class = "mid"
+                badge_text = "Srednji"
+            else:
+                badge_class = "low"
+                badge_text = "Slabiji"
+
+            cards += f"""
+            <div class="card">
+                <div class="title">{home} vs {away}</div>
+                <div class="row"><b>Ishod:</b> {outcome}</div>
+                <div class="row"><b>Bookmaker:</b> {bookmaker}</div>
+                <div class="row"><b>Kvota:</b> {bookmaker_price}</div>
+                <div class="row"><b>Market avg:</b> {market_avg}</div>
+                <div class="row"><b>Dev:</b> {deviation_percent}%</div>
+                <div class="row"><b>EV:</b> {expected_value}</div>
+                <div class="row"><b>Score:</b> {signal_score} <span class="badge {badge_class}">{badge_text}</span></div>
+                <div class="time">{created_at}</div>
+            </div>
+            """
+
+    body = f"""
+    <div class="header">
+        <h1>Top signali</h1>
+        <div class="muted">Najjači signali u zadnja 24 sata</div>
+    </div>
+    <div class="nav">
+        <a href="/">Početna</a>
+        <a href="/signals">Zadnji signali</a>
+    </div>
+    {cards}
+    """
+    return render_layout("Top signali", body)
 
 
 def fetch_odds():
@@ -424,7 +587,7 @@ def fetch_odds():
                     away,
                     outcome_name,
                     item["bookmaker"],
-                    round(bookmaker_price, 4)
+                    round(bookmaker_price, 4),
                 )
 
                 if anomaly_key in seen_anomalies:
