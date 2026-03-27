@@ -45,6 +45,18 @@ def fetch_odds():
 scheduler = BackgroundScheduler()
 scheduler.add_job(fetch_odds, "interval", minutes=15)
 scheduler.start()
+import time
+
+while True:
+    try:
+        print("Fetching odds...")
+        fetch_odds()
+        print("Done. Sleeping...")
+    except Exception as e:
+        print("Error:", e)
+
+    time.sleep(900)  # 15 minuta
+    
 
 @app.get("/")
 def root():
