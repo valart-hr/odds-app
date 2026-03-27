@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse
 import requests
 import psycopg2
 import os
@@ -26,9 +26,58 @@ MIN_EXPECTED_VALUE = 0.03
 MAX_MARKET_SPREAD_PERCENT = 60.0
 
 
-@app.get("/")
-def root():
-    return {"status": "running"}
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Odds Scanner</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 16px;
+                background: #f5f5f5;
+                color: #111;
+            }
+            .card {
+                background: white;
+                border-radius: 14px;
+                padding: 16px;
+                margin-bottom: 12px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            }
+            h1 {
+                font-size: 24px;
+                margin-bottom: 8px;
+            }
+            a.button {
+                display: inline-block;
+                padding: 12px 16px;
+                background: #111;
+                color: white;
+                text-decoration: none;
+                border-radius: 10px;
+                margin-top: 8px;
+            }
+            .small {
+                color: #666;
+                font-size: 14px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>Odds Scanner</h1>
+            <div class="small">App radi i skenira tržište.</div>
+            <p><a class="button" href="/signals">Otvori zadnje signale</a></p>
+            <p><a class="button" href="/health">Health check</a></p>
+            <p><a class="button" href="/latest-anomalies">Raw JSON</a></p>
+        </div>
+    </body>
+    </html>
+    """
 
 
 @app.get("/health")
@@ -40,7 +89,132 @@ def health():
 def latest_anomalies():
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
+@app.get("/signals", response_class=HTMLResponse)
+def signals():
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
 
+    cur.execute("""
+        SELECT home, away, outcome, bookmaker, bookmaker_price, market_avg,
+               deviation_percent, expected_value, signal_score, created_at
+        FROM odds_anomalies
+        ORDER BY id DESC
+        LIMIT 30
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    cards = ""
+
+    if not rows:
+        cards = """
+        <div class="card">
+            <div class="title">Nema signala još</div>
+            <div class="muted">Pričekaj malo i osvježi stranicu.</div>
+        </div>
+        """
+    else:
+        for row in rows:
+            home, away, outcome, bookmaker, bookmaker_price, market_avg, deviation_percent, expected_value, signal_score, created_at = row
+
+            if signal_score >= 12:
+                badge = "Jak signal"
+            elif signal_score >= 9:
+                badge = "Srednji signal"
+            else:
+                badge = "Slabiji signal"
+
+            cards += f"""
+            <div class="card">
+                <div class="title">{home} vs {away}</div>
+                <div class="row"><b>Ishod:</b> {outcome}</div>
+                <div class="row"><b>Bookmaker:</b> {bookmaker}</div>
+                <div class="row"><b>Kvota:</b> {bookmaker_price}</div>
+                <div class="row"><b>Market avg:</b> {market_avg}</div>
+                <div class="row"><b>Dev:</b> {deviation_percent}%</div>
+                <div class="row"><b>EV:</b> {expected_value}</div>
+                <div class="row"><b>Score:</b> {signal_score} <span class="badge">{badge}</span></div>
+                <div class="time">{created_at}</div>
+            </div>
+            """
+
+    return f"""
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Signals</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 12px;
+                background: #f3f4f6;
+                color: #111827;
+            }}
+            .top {{
+                margin-bottom: 12px;
+            }}
+            .title-main {{
+                font-size: 24px;
+                font-weight: 700;
+                margin-bottom: 4px;
+            }}
+            .muted {{
+                color: #6b7280;
+                font-size: 14px;
+            }}
+            .card {{
+                background: white;
+                border-radius: 16px;
+                padding: 14px;
+                margin-bottom: 12px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            }}
+            .title {{
+                font-size: 18px;
+                font-weight: 700;
+                margin-bottom: 8px;
+            }}
+            .row {{
+                margin: 4px 0;
+                font-size: 15px;
+            }}
+            .time {{
+                margin-top: 8px;
+                font-size: 12px;
+                color: #6b7280;
+            }}
+            .badge {{
+                display: inline-block;
+                padding: 3px 8px;
+                border-radius: 999px;
+                background: #e5e7eb;
+                font-size: 12px;
+                margin-left: 6px;
+            }}
+            a.button {{
+                display: inline-block;
+                padding: 10px 14px;
+                background: #111827;
+                color: white;
+                text-decoration: none;
+                border-radius: 10px;
+                margin-top: 8px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="top">
+            <div class="title-main">Zadnji signali</div>
+            <div class="muted">Prikaz zadnjih 30 anomaly zapisa</div>
+            <a class="button" href="/">Početna</a>
+        </div>
+        {cards}
+    </body>
+    </html>
+    """
     cur.execute("""
         SELECT home, away, outcome, bookmaker, bookmaker_price, market_avg,
                deviation_percent, expected_value, signal_score, created_at
