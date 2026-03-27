@@ -1,4 +1,5 @@
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 import requests
 import psycopg2
 import os
@@ -11,19 +12,47 @@ app = FastAPI()
 API_KEY = os.getenv("API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Telegram je opcionalan
+# Telegram opcionalno
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# Interval osvježavanja
 FETCH_INTERVAL_SECONDS = 60
 
 # Filteri
 MIN_BOOKMAKERS_PER_OUTCOME = 3
-MIN_PRICE = 1.70
-MAX_PRICE = 4.50
-MIN_DEVIATION_PERCENT = 8.0
+MIN_PRICE = 1.40
+MAX_PRICE = 6.00
+MIN_DEVIATION_PERCENT = 5.0
 MIN_EXPECTED_VALUE = 0.03
 MAX_MARKET_SPREAD_PERCENT = 60.0
+
+
+def normalize_text(value: str) -> str:
+    return (value or "").strip()
+
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def send_telegram_message(text: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    try:
+        requests.post(
+            url,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text
+            },
+            timeout=15
+        )
+    except Exception as e:
+        print("Telegram error:", e)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -60,6 +89,7 @@ def home():
                 text-decoration: none;
                 border-radius: 10px;
                 margin-top: 8px;
+                margin-right: 8px;
             }
             .small {
                 color: #666;
@@ -71,9 +101,11 @@ def home():
         <div class="card">
             <h1>Odds Scanner</h1>
             <div class="small">App radi i skenira tržište.</div>
-            <p><a class="button" href="/signals">Otvori zadnje signale</a></p>
-            <p><a class="button" href="/health">Health check</a></p>
-            <p><a class="button" href="/latest-anomalies">Raw JSON</a></p>
+            <p>
+                <a class="button" href="/signals">Otvori zadnje signale</a>
+                <a class="button" href="/health">Health check</a>
+                <a class="button" href="/latest-anomalies">Raw JSON</a>
+            </p>
         </div>
     </body>
     </html>
@@ -82,16 +114,47 @@ def home():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "status": "running"}
 
 
 @app.get("/latest-anomalies")
 def latest_anomalies():
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_conn()
     cur = conn.cursor()
+
+    cur.execute("""
+        SELECT home, away, outcome, bookmaker, bookmaker_price, market_avg,
+               deviation_percent, expected_value, signal_score, created_at
+        FROM odds_anomalies
+        ORDER BY id DESC
+        LIMIT 20
+    """)
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "home": row[0],
+            "away": row[1],
+            "outcome": row[2],
+            "bookmaker": row[3],
+            "bookmaker_price": row[4],
+            "market_avg": row[5],
+            "deviation_percent": row[6],
+            "expected_value": row[7],
+            "signal_score": row[8],
+            "created_at": str(row[9]),
+        })
+
+    return result
+
+
 @app.get("/signals", response_class=HTMLResponse)
 def signals():
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -215,57 +278,6 @@ def signals():
     </body>
     </html>
     """
-    cur.execute("""
-        SELECT home, away, outcome, bookmaker, bookmaker_price, market_avg,
-               deviation_percent, expected_value, signal_score, created_at
-        FROM odds_anomalies
-        ORDER BY id DESC
-        LIMIT 20
-    """)
-
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    result = []
-    for row in rows:
-        result.append({
-            "home": row[0],
-            "away": row[1],
-            "outcome": row[2],
-            "bookmaker": row[3],
-            "bookmaker_price": row[4],
-            "market_avg": row[5],
-            "deviation_percent": row[6],
-            "expected_value": row[7],
-            "signal_score": row[8],
-            "created_at": str(row[9]),
-        })
-
-    return result
-
-
-def normalize_text(value: str) -> str:
-    return (value or "").strip()
-
-
-def send_telegram_message(text: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    try:
-        requests.post(
-            url,
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text
-            },
-            timeout=15
-        )
-    except Exception as e:
-        print("Telegram error:", e)
 
 
 def fetch_odds():
@@ -292,7 +304,7 @@ def fetch_odds():
         print("No odds data received")
         return
 
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_conn()
     cur = conn.cursor()
 
     now_utc = datetime.datetime.utcnow()
@@ -334,7 +346,6 @@ def fetch_odds():
                     if price <= 1.0:
                         continue
 
-                    # spremi sve u odds_history
                     history_key = (home, away, bookmaker_name, outcome_name, price)
                     if history_key not in seen_history:
                         cur.execute(
@@ -365,7 +376,6 @@ def fetch_odds():
         seen_anomalies = set()
 
         for outcome_name, odds_list in outcomes_dict.items():
-            # jedan bookmaker = jedna kvota, uzmi najvišu
             per_bookmaker = {}
             for item in odds_list:
                 name = item["bookmaker"]
@@ -416,6 +426,7 @@ def fetch_odds():
                     item["bookmaker"],
                     round(bookmaker_price, 4)
                 )
+
                 if anomaly_key in seen_anomalies:
                     continue
 
@@ -455,7 +466,6 @@ def fetch_odds():
                     f"ev={expected_value:.4f} | score={signal_score:.2f}"
                 )
 
-                # Telegram alert samo za jače signale
                 if signal_score >= 10:
                     message = (
                         f"Anomaly signal\n"
